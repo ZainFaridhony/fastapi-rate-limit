@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections import deque
 from typing import Deque, Dict
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, Request, status
+from fastapi.responses import JSONResponse
+
+
+class RateLimitExceeded(Exception):
+    """Raised when a project exceeds the configured rate limit."""
+
+    def __init__(self, project_id: str, retry_after: int) -> None:
+        self.project_id = project_id
+        self.retry_after = retry_after
 
 
 class RateLimiter:
@@ -29,16 +39,13 @@ class RateLimiter:
                 requests.popleft()
 
             if len(requests) >= self.limit:
-                # Reject the request once the per-project quota is exhausted
-                # within the rolling window.
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail={
-                        "error": "Too Many Requests",
-                        "message": "Rate limit exceeded for project",
-                        "project_id": project_id,
-                    },
+                retry_after = max(
+                    0,
+                    math.ceil(self.window_seconds - (now - requests[0])),
                 )
+                # Reject the request once the per-project quota is exhausted
+                # within the rolling window, providing Retry-After metadata.
+                raise RateLimitExceeded(project_id=project_id, retry_after=retry_after)
 
             # Store the timestamp for the accepted request so future calls can
             # evaluate the updated usage for this project.
@@ -53,6 +60,23 @@ async def enforce_rate_limit(project_id: str = Header(..., alias="X-Project-ID")
     """Dependency that applies the rate limit for the provided project."""
     await limiter.hit(project_id)
     return project_id
+
+
+@app.exception_handler(RateLimitExceeded)
+async def handle_rate_limit_exceeded(
+    request: Request,  # noqa: ARG001 - FastAPI requires the request argument
+    exc: RateLimitExceeded,
+) -> JSONResponse:
+    """Translate rate limit errors into a consistent 429 JSON response."""
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={
+            "error": "Too Many Requests",
+            "message": "Rate limit exceeded for project",
+            "project_id": exc.project_id,
+        },
+        headers={"Retry-After": str(exc.retry_after)},
+    )
 
 
 @app.get("/your-endpoint")

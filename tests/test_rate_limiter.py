@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-client = TestClient(app)
+client = TestClient(app=app)
 
 
 def _make_request(project_id: str):
